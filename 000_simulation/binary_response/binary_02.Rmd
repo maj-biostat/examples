@@ -1,0 +1,302 @@
+---
+title: "Binary response random intercept 2"
+subtitle: "`r knitr::current_input(dir = TRUE)`"
+author: "Mark Jones"
+date: "`r Sys.time()`"
+editor_options:
+  chunk_output_type: console
+output:
+  html_document:
+  theme: united
+toc: yes
+pdf_document:
+  toc: yes
+toc_depth: 3
+number_sections: true
+fig_caption: yes
+---
+  
+  
+# Preamble
+
+Looking at a binary endpoint with random intercept.
+  
+```{r, echo = F}
+suppressPackageStartupMessages(library(compiler))
+suppressPackageStartupMessages(library(data.table))
+suppressPackageStartupMessages(library(rbenchmark))
+suppressPackageStartupMessages(library(ggplot2))
+suppressPackageStartupMessages(library(lme4))
+suppressPackageStartupMessages(library(simstudy))
+suppressPackageStartupMessages(library(ggcorrplot))
+suppressPackageStartupMessages(library(gridExtra))
+suppressPackageStartupMessages(library(geepack))
+
+ggplot2::theme_set(ggplot2::theme_bw())
+ggplot2::theme_update(text = element_text(size = 10))
+ggplot2::theme_update(legend.position = "top")
+# ggplot2::theme_update(legend.title = element_blank())
+ggplot2::theme_update(axis.text.x = element_text(size = 10))
+ggplot2::theme_update(axis.text.y = element_text(size = 10))
+```
+
+
+Define utility functions.
+
+```{r}
+prob_to_odd <- cmpfun(function(x){
+  return(x/(1-x))
+})
+
+inv_logit <- cmpfun(function(x){
+  return(exp(x)/(1+exp(x)))
+})
+```
+
+# Copula to generate correlated binary data
+
+Use copula to generate correlated target dist from mvn. Here, a compound symmetrical covariance matrix is used to create the MVN. The correlation is between sequences of random variables, not within so we need to transform the wide data to long.
+
+```{r}
+# create correlation matrix
+# n_mmt number of measurements on a subj
+n_mmt <- 4
+n_subj <- 100
+m <- diag(n_mmt)
+m[upper.tri(m)] = 0.8
+m[lower.tri(m)] = 0.8
+
+# vector sigma is the variance of each var
+# can be whatever you want. 
+# here I just leave the means as zero, var = 1, covar = 0.8
+sigma <- rep(1, n_mmt)
+cov1 <- outer(sigma, sigma) * m
+# cov2cor(cov1)
+
+# generate mvn 100 subjects
+mvn <- MASS::mvrnorm(n_subj, mu = rep(0, n_mmt), m)
+colnames(mvn) <- paste0("v", 1:n_mmt)
+```
+
+Scatter plot matrix showing the pairwise association of measurements at different timepoints. Compares obs at time 1 with obs at time 2 etc.
+
+```{r}
+panel.cor <- function(x, y){
+    usr <- par("usr"); on.exit(par(usr))
+    par(usr = c(0, 1, 0, 1))
+    r <- round(cor(x, y), digits=3)
+    txt <- paste0("R = ", r)
+    cex.cor <- 0.8/strwidth(txt)
+    text(0.5, 0.5, txt, cex = cex.cor * r)
+}
+pairs(mvn, lower.panel = panel.cor)
+```
+
+Correlation between repeat observations.
+
+```{r}
+sig <- apply(mvn, MARGIN = 2, FUN = sd)
+cov1 <- sum((mvn[,1]-mean(mvn[,1])) * (mvn[,2]-mean(mvn[,2]))) / (nrow(mvn)-1)
+cov2 <- sum((mvn[,2]-mean(mvn[,2])) * (mvn[,3]-mean(mvn[,3]))) / (nrow(mvn)-1)
+# correlation between measures at time 1 and 2
+cov1 / (sig[1] * sig[2])
+cov2 / (sig[2] * sig[3])
+```
+
+Now transform the MVN into repeat measure correlated binary random variables.
+
+```{r}
+mvn <- as.data.table(cbind(id = 1:nrow(mvn), mvn))
+# put into long format variable instance, value
+dmvn <- data.table(data.table::melt(mvn, id.vars = 1, 
+                                    variable.name = "seq",
+                                    value.name = "y"))
+
+# the repeat measures that went across mvn are now in long format
+setkey(dmvn, "id")   
+dmvn[, seqid := .I]
+
+# compute u, which is uniformly distributed
+dmvn[, u := pnorm(y)]
+
+# generate the target distribution with constant prob of event
+prob_event <- 0.5
+dmvn[, b := qbinom(u, 1, prob_event), keyby = seqid]
+
+# for bernoulli dist, the correlation structure is 
+# biased downwards ie. the correlation b/w vars on
+# the target dist is lower than the rho in the
+# correlation matrix used to generate the mvn vars
+m2 <- as.matrix(data.table::dcast(dmvn, id~seq, value.var = "b")[, -1])
+c1 <- round(cor(m2), 2)
+
+```
+
+```{r, echo = F}
+gendat1 <- function(prob = 0.5){
+  
+  n_mmt <- 4
+  if(length(prob) == 1) prob <- rep(prob, n_mmt)
+  stopifnot(length(prob) == n_mmt)
+  
+  n_subj <- 50
+  m <- diag(n_mmt)
+  m[upper.tri(m)] = 0.8
+  m[lower.tri(m)] = 0.8
+  
+  # vector sigma is the variance of each var
+  # can be whatever you want. 
+  # here I just leave the means as zero, var = 1, covar = 0.8
+  sigma <- rep(1, n_mmt)
+  cov1 <- outer(sigma, sigma) * m
+  # cov2cor(cov1)
+  
+  # generate mvn 100 subjects
+  mvn <- MASS::mvrnorm(n_subj, mu = rep(0, n_mmt), m)
+  colnames(mvn) <- paste0("v", 1:n_mmt)
+  mvn <- as.data.table(cbind(id = 1:nrow(mvn), mvn))
+  
+  # put into long format variable instance, value
+  dmvn <- data.table(data.table::melt(mvn, id.vars = 1, 
+                                      variable.name = "seq",
+                                      value.name = "y"))
+  
+  # the repeat measures that went across mvn are now in long format
+  setkey(dmvn, "id")   
+  dmvn[, seqid := .I]
+  
+  # compute u, which is uniformly distributed
+  dmvn[, u := pnorm(y)]
+  
+  # generate the target distribution having probability 
+  # of event equal to pcut
+  dmvn[, b := qbinom(u, 1, prob)]
+  dmvn
+}
+```
+
+The best insight we can get into the correlation structure in our data is via a GEE, but it shows what we already know - the correlation is not decreased in the target variables from what it originally was. 
+
+```{r}
+dmvn <- gendat1(prob = 0.7)
+g1 <- geepack::geeglm(b ~ 1, data = dmvn, family = binomial,
+                          id = id, corstr = "exchangeable")
+summary(g1)
+
+g2 <- lme4::glmer(b ~ 1 + (1|id), data = dmvn, family = binomial)
+summary(g2)
+sjstats::icc(g2, adjust = T)
+
+g3 <- glm(b ~ 1 , data = dmvn, family = binomial)
+summary(g3)
+```
+
+While the correlation in repeat measures might be of interest in itself, what we are often interested in is a treatment effect, say pre-post. The correlation between measures is still non-zero as revealed by the R structure parameter.
+
+```{r}
+# Now generate the data with different probability in the first two 
+# and the last two measurements.
+dmvn <- gendat1(prob = c(0.3, 0.3, 0.7, 0.7))
+
+dmvn$tx <- rep(c(0,0,1,1), len = nrow(dmvn))
+
+g1 <- geepack::geeglm(b ~ tx, data = dmvn, family = binomial,
+                          id = id, corstr = "exchangeable")
+summary(g1)
+predict(g1, type = "response")[c(2, 4)]
+```
+
+Another way to analyse the (binary) data is to aggregate. This needs to be done at each time point otherwise we would be combining dependent rather than independent events. While the point estimates from the GLM are the same, the standard errors are higher and wider than they should be.
+
+```{r}
+nsim <- 1000
+m <- matrix(0, ncol = 16, nrow = nsim)
+for(i in 1:nsim){
+  dmvn <- gendat1(prob = c(0.3, 0.3, 0.7, 0.7))
+  
+  dmvn$t2 <- rep(c(0, 1, 0, 0), len = nrow(dmvn))
+  dmvn$t3 <- rep(c(0, 0, 1, 0), len = nrow(dmvn))
+  dmvn$t4 <- rep(c(0, 0, 0, 1), len = nrow(dmvn))
+  
+  dmvn$t <- rep(1:4, len = nrow(dmvn))
+  
+  g1 <- geepack::geeglm(b ~ t2 + t3 + t4, data = dmvn, 
+                        family = binomial,
+                        id = id, corstr = "exchangeable")
+  s <- summary(g1)$coef
+  
+  est1 <- s[, "Estimate"]
+  se1 <- s[, "Std.err"]
+  
+  dmvn2 <- dmvn[, .(sum(b), .N), by = "t"]
+
+  g2 <- glm(cbind(V1, N-V1) ~ factor(t), data = dmvn2, 
+            family = binomial)
+  s <- summary(g2)$coef
+  
+  est2 <- s[, "Estimate"]
+  se2 <- s[, "Std. Error"]
+  
+  m[i, ] <- as.numeric(c(est1, est2, se1, se2))
+}
+colnames(m) <- c(paste0("gee_est", c(1:4)), 
+                 paste0("glm_est", c(1:4)), 
+                 paste0("gee_se", c(1:4)), 
+                 paste0("glm_se", c(1:4)))
+#head(m)
+```
+
+
+
+
+```{r, fig.height=10, echo = F}
+idx <- lapply(9:12, function(x) c(x, x+4))
+se_xmin <- unlist(lapply(idx, function(x) min(m[,x])))
+se_xmax <- unlist(lapply(idx, function(x) max(m[,x])))
+se_ymax <- unlist(lapply(idx, function(x) max( c(density(m[,x[[1]]])$y,
+                                          density(m[,x[[2]]])$y)  )) )
+
+par(mfrow = c(4, 2))
+
+plot(density(m[,"gee_est1"]), main = "Estimate t1")
+lines(density(m[,"glm_est1"]), col = "red", lty = 2)
+plot(density(m[,"gee_se1"]), 
+     xlim = c(se_xmin[1], se_xmax[1]), 
+     ylim = c(0, se_ymax[1]), main = "SE t1")
+lines(density(m[,"glm_se1"]), col = "red", lty = 2)
+
+plot(density(m[,"gee_est2"]), main = "Estimate t2")
+lines(density(m[,"glm_est2"]), col = "red", lty = 2)
+plot(density(m[,"gee_se2"]), 
+     xlim = c(se_xmin[2], se_xmax[2]), 
+     ylim = c(0, se_ymax[2]), main = "SE t2")
+lines(density(m[,"glm_se2"]), col = "red", lty = 2)
+
+plot(density(m[,"gee_est3"]), main = "Estimate t3")
+lines(density(m[,"glm_est3"]), col = "red", lty = 2)
+plot(density(m[,"gee_se3"]), 
+     xlim = c(se_xmin[3], se_xmax[3]), 
+     ylim = c(0, se_ymax[3]), main = "SE t3")
+lines(density(m[,"glm_se3"]), col = "red", lty = 2)
+
+plot(density(m[,"gee_est4"]), main = "Estimate t4")
+lines(density(m[,"glm_est4"]), col = "red", lty = 2)
+plot(density(m[,"gee_se4"]), 
+     xlim = c(se_xmin[4], se_xmax[4]), 
+     ylim = c(0, se_ymax[4]), main = "SE t4")
+lines(density(m[,"glm_se4"]), col = "red", lty = 2)
+```
+
+```{r, echo = F}
+par(mfrow = c(1, 1))
+```
+
+
+
+
+
+
+
+
+
+
