@@ -1,0 +1,343 @@
+---
+title: "Piecewise Exponential modelling using stan"
+subtitle: "`r knitr::current_input(dir = TRUE)`"
+author: "Mark Jones"
+date: "`r Sys.time()`"
+output:
+  html_document:
+    number_sections: yes
+    self_contained: yes
+    theme: united
+    toc: yes
+    toc_float: true
+    toc_depth: 3
+geometry: left=0.2cm,right=0.2cm,top=1cm,bottom=1cm
+editor_options:
+  chunk_output_type: console
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+library(dplyr)
+library(nphsim)
+library(survival)
+library(data.table)
+```
+
+# Preamble
+
+Piecewise exponential specified with three baseline hazards.
+
+```{r, echo = F}
+rates <- c(0.05, 0.04, 0.02)
+intervals <- c(6, 6)
+
+mypwexp <- function(n, rates, intervals){
+  
+  k <- length(rates)
+  tx <- 0
+  j <- 1
+  times <- array(0,n)
+  timex <- cumsum(intervals)
+  indx <- array(TRUE,n)
+  for(i in 1:k){
+    nindx <- sum(indx)
+    if (nindx==0) break
+    increment <- rexp(nindx,rates[i])
+    times[indx] <- tx + increment
+    if (i<k){
+      tx <- timex[i]
+      indx <- (times > timex[i])
+    }
+  }
+  return(times)
+  
+}
+
+n <- 400
+x0 <- mypwexp(n/2, rates, intervals)
+x1 <- mypwexp(n/2, rates - 0.01, intervals)
+
+```
+
+KM plot. 
+
+```{r}
+d <- data.table(event = rep(1, n), 
+                time = c(x0, x1),
+                grp = rep(0:1, each = n/2))
+
+d[, event := as.numeric(d$time <= 36)]
+d[event == 0, time := 36]
+
+fit <- survfit(Surv(time, event) ~ grp, data = d)
+plot(fit, lty = 1:2,col=1:2)
+legend(
+  "topright",
+  legend=c("PWE0", "PWE1"),
+  col=1:2,
+  lty=1:2,
+  horiz=FALSE,
+  bty='n')
+```
+
+
+# Transform to long format
+
+```{r}
+rates <- c(0.05, 0.04, 0.03, 0.03, 0.02)
+intervals <- c(6, 12, 24, 36)
+n <- 100
+x0 <- mypwexp(n/2, rates, intervals)
+x1 <- mypwexp(n/2, rates - 0.01, intervals)
+d <- data.table(event = rep(1, n), 
+                time = c(x0, x1),
+                grp = rep(0:1, each = n/2))
+
+# split at each timepoint 
+d2 <- survSplit(data = d, 
+                cut = intervals, 
+                episode = "intvl",
+                start="start", 
+                id = "id", 
+                end="time", 
+                event="event")
+
+d2 <- d2 %>%
+  dplyr::mutate(exposure = time - start,
+                intvl = factor(intvl,  
+                           labels = paste("_", c(0,intervals), "_", 
+                                          c(intervals,1000), sep="")))
+
+
+
+
+```
+
+
+# GLM
+
+```{r}
+f1 <- glm(event ~ grp + intvl + offset(log(exposure)), 
+          data=d2, family=poisson)
+summary(f1)
+b = coef(f1)
+
+idx <- paste0("intvl", unique(d2$intvl))[-1]
+h = exp( b[1] + c(0, b[idx] ) )
+names(h) <- paste0("intvl", unique(d2$intvl))
+h
+
+H = cumsum(6  * h)
+S = exp(-H)
+S
+```
+
+# rstanarm
+
+```{r}
+library(rstanarm)
+f2 <- rstanarm::stan_glm(event ~ -1 + intvl + grp + offset(log(exposure)),
+                         data = d2,
+                         family = poisson(link = "log"),
+                         prior = normal(location = 0, scale = 4))
+summary(f2)
+exp(coef(f2)[1:5])
+
+# todo review this.
+# library(loo)
+# loo(f2)
+```
+
+# Visualisation
+
+```{r}
+cunstruct_cumulative_hazard_function <- function(cutpoints, 
+                                                 log_baseline_hazards, 
+                                                 group_effect) {
+
+    ## t is a vector of time points. group is {0,1} scalar
+    cumulative_hazard_function <- function(t, group) {
+        ## Boolean for any exposed time in each interval
+        ## length(cutpoints) x length(t)
+        interval_exposed <- outer(cutpoints, t, `<`)
+
+        ## t - cutpoint. Multiply by interval exposed to avoid negative times.
+        time_exposed <-  -outer(cutpoints, t, `-`) * interval_exposed
+
+        ## Last interval is of width Inf
+        interval_widths <- c(diff(cutpoints), Inf)
+
+        ## For each interval, time exposed cannot exceed interval width.
+        time_exposed_correct  <- sweep(x = time_exposed,
+                                       MARGIN = 1,
+                                       STATS = interval_widths,
+                                       FUN = pmin)
+
+        ## Multiply by corresponding baseline hazards to get interval specific cumulative baseline hazards.
+        interval_baseline_cumulative_hazards <- sweep(x = time_exposed_correct,
+                                                      MARGIN = 1,
+                                                      STATS = exp(log_baseline_hazards),
+                                                      FUN = `*`)
+
+        ## Cumulative baseline hazard vector length(t)
+        baseline_cumulative_hazards <- colSums(interval_baseline_cumulative_hazards)
+
+        ## return after applying group effect
+        return(baseline_cumulative_hazards * exp(group_effect * group))
+    }
+
+    return(cumulative_hazard_function)
+}
+
+library(tidybayes)
+library(tidyr)
+library(purrr)
+cum_haz <- tidybayes::tidy_draws(f2) %>%
+    mutate(`H(t|x)` = pmap(list(intvl_0_6, intvl_6_12, 
+                                intvl_12_24, intvl_24_36, intvl_36_1000, grp),
+                           function(intvl_0_6, intvl_6_12, intvl_12_24, 
+                                    intvl_24_36, intvl_36_1000, grp){
+                               cunstruct_cumulative_hazard_function(
+                                   cutpoints = intervals,
+                                   log_baseline_hazards = c(intvl_0_6, 
+                                                            intvl_6_12, intvl_12_24,
+                                                            intvl_24_36, 
+                                                            intvl_36_1000, grp),
+                                   group_effect = grp)
+                           })) %>%
+    select(.chain, .iteration, .draw, `H(t|x)`)
+
+```
+
+```{r}
+create_plot_df <- function(cum_haz) {
+    ## Evaluation time points
+    times_df <- data_frame(t = seq(from = 0, to = 150, by = 1))
+
+    cum_haz %>%
+        mutate(times_df = list(times_df)) %>%
+        mutate(times_df = pmap(list(times_df, `H(t|x)`),
+                               function(times_df, `H(t|x)`) {
+                                   times_df %>%
+                                       mutate(`H(t|1)` = `H(t|x)`(t, 1),
+                                              `H(t|0)` = `H(t|x)`(t, 0)) %>%
+                                       mutate(`S(t|1)` = exp(-`H(t|1)`),
+                                              `S(t|0)` = exp(-`H(t|0)`)) %>%
+                                       select(-`H(t|1)`, -`H(t|0)`)
+                               }
+                               )
+               ) %>%
+        select(-`H(t|x)`) %>%
+        unnest() %>%
+        gather(key = treatment,
+               value = survival,
+               `S(t|1)`, `S(t|0)`) %>%
+        mutate(treatment = factor(treatment,
+                                  levels = c("S(t|0)", "S(t|1)"),
+                                  labels = c("ctl","trt")))
+}
+
+summarize_df <- function(df) {
+    df %>%
+        group_by(treatment, t) %>%
+        summarize(survival_mean = mean(survival),
+                  survival_95upper = quantile(survival, probs = 0.975),
+                  survival_95lower = quantile(survival, probs = 0.025))
+}
+
+plot_df <- function(df) {
+    df_summary <- summarize_df(df)
+
+    df %>%
+        ggplot(mapping = aes(x = t, y = survival,
+                             group = interaction(.chain, .iteration, .draw, treatment))) +
+        geom_line(size = 0.1, alpha = 0.025) +
+        geom_line(data = df_summary,
+                  mapping = aes(y = survival_mean, group = treatment)) +
+        geom_line(data = df_summary,
+                  mapping = aes(y = survival_95upper, group = treatment),
+                  linetype = "dotted") +
+        geom_line(data = df_summary,
+                  mapping = aes(y = survival_95lower, group = treatment),
+                  linetype = "dotted") +
+        facet_grid(. ~ treatment) +
+        theme_bw() +
+        theme(axis.text.x = element_text(angle = 90, vjust = 0.5),
+              legend.key = element_blank(),
+              plot.title = element_text(hjust = 0.5),
+              strip.background = element_blank())
+}
+```
+
+
+
+
+```{r}
+dsurv <- cum_haz %>% create_plot_df()
+dsurv %>%
+    plot_df() +
+    labs(title = "Five constant Haz")
+```
+
+
+
+
+
+
+
+
+
+
+# Stan
+
+
+
+
+
+
+
+
+```{r}
+l <- list(N = nrow(d2),
+          S = max(d2$id),
+          T = length(unique(d2$time)),
+          M = 1, 
+          
+          s = d2$id,
+          t = d2$interval,
+          event = d2$event,
+          
+          x = array(d2$grp, dim = c(55,1)),
+          
+          obs_t = d2$time,
+          t_dur = sort(unique(d2$duration))
+          )
+
+library("rstan") 
+Sys.setenv(USE_CXX14 = 1)
+rstan_options(auto_write = TRUE)
+options(mc.cores = parallel::detectCores())
+
+f1 <- stan(file = '001_pwe_stan_mod1.stan', 
+           data = l, 
+           iter = 4000, chains = 1,
+           verbose = F)
+
+summary(f1)
+```
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
