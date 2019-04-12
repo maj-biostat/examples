@@ -1,0 +1,362 @@
+---
+title: "AFT model - weibull brms"
+subtitle: "`r knitr::current_input(dir = TRUE)`"
+author: "Mark Jones"
+date: "`r Sys.time()`"
+output:
+  html_document:
+    number_sections: yes
+    self_contained: yes
+    theme: united
+    toc: yes
+    toc_depth: 3
+geometry: left=0.2cm,right=0.2cm,top=1cm,bottom=1cm
+editor_options:
+  chunk_output_type: console
+---
+
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+suppressPackageStartupMessages(library(rstan))
+suppressPackageStartupMessages(library(dplyr))
+suppressPackageStartupMessages(library(nphsim))
+suppressPackageStartupMessages(library(survival))
+suppressPackageStartupMessages(library(data.table))
+suppressPackageStartupMessages(library(brms))
+```
+
+# Preamble
+
+Data generation using piecewise exponential specified with three baseline hazards.
+
+```{r, echo = T}
+mypwexp <- function(n, rates, intervals){
+  
+  k <- length(rates)
+  tx <- 0
+  j <- 1
+  times <- array(0,n)
+  timex <- cumsum(intervals)
+  indx <- array(TRUE,n)
+  for(i in 1:k){
+    nindx <- sum(indx)
+    if (nindx==0) break
+    increment <- rexp(nindx,rates[i])
+    times[indx] <- tx + increment
+    if (i<k){
+      tx <- timex[i]
+      indx <- (times > timex[i])
+    }
+  }
+  return(times)
+  
+}
+
+rates <- c(0.05, 0.04, 0.03, 0.03, 0.02)
+intervals <- c(6, 12, 24, 36)
+n <- 100
+x0 <- mypwexp(n/2, rates, intervals)
+x1 <- mypwexp(n/2, rates - 0.015, intervals)
+d <- data.table(cen = rep(0, n), 
+                time = c(x0, x1),
+                grp = rep(0:1, each = n/2))
+d[, cen := as.numeric(d$time > 40)]
+d[cen == 1, time := 40]
+d[, event := 1-cen]
+
+# long format - don't need this, it is just for ref
+# split at each timepoint 
+d2 <- survSplit(data = d, 
+                cut = intervals, 
+                episode = "intvl",
+                start="start", 
+                id = "id", 
+                end="time", 
+                event="event")
+
+d2 <- d2 %>%
+  dplyr::mutate(exposure = time - start,
+                intvl = factor(intvl,  
+                           labels = paste("_", c(0,intervals), "_", 
+                                          c(intervals,1000), sep="")))
+```
+
+KM plot. 
+
+```{r, echo = F}
+fit <- survfit(Surv(time, event) ~ grp, data = d)
+plot(fit, lty = 1:2,col=1:2)
+legend(
+  "topright",
+  legend=c("PWE0", "PWE1"),
+  col=1:2,
+  lty=1:2,
+  horiz=FALSE,
+  bty='n')
+dkmfig <- data.table(t = fit$time,
+                     surv = fit$surv,
+                     grp = c(rep(0, fit$strata[1]), rep(1, fit$strata[2])))
+```
+
+
+# Modelling
+
+## survreg - aft parameterisation
+
+No idea what the interpretation of the intercept is.
+
+\begin{aligned}
+ln(t_i) = x_i \beta + z_j
+\end{aligned}
+
+For the exponential dist, $z_j$ is from the extreme-value dist.
+
+The location-scale parameterization of a Weibull distribution found in survreg is not the same as the parameterization of `rweibull`.
+
+```{r}
+library(flexsurv)
+f1 <- survreg(Surv(time, event) ~ grp, dist = "weibull", data = d)
+summary(f1)
+# median survival times
+meds <- predict(f1, type = "quantile", p = 0.5, newdata = data.frame(grp = 0:1))
+meds
+# different parameterisation as per rweibull (affects shape and scale).
+fs1 <- flexsurvreg(Surv(time, event) ~ grp, dist = "weibull", data = d)
+print(fs1)
+# the scale is > 1, implies the hazard rate is increasing with an
+# increasing rate
+f1$scale
+# the positive coefficient for grp imply longer time to event
+# in the treatment group 
+# the tte in the trt group is stretched by a factor of 1.54
+exp(coef(f1))
+
+# exponentiated coef for group gives the acceleration factor
+# from which we can compute the median surv in the trt group
+# by multiplying the ctl median surv time by the accel fact.
+meds[1]*exp(coef(f1))[2]
+```
+
+These are two of the most useful links I have found on the confusing mismatch of parameterisations in R for handling weibull.
+
+https://web.archive.org/web/20170503182040/www.unc.edu/courses/2010spring/ecol/562/001/docs/lectures/lecture24.htm#parametric
+
+```{r}
+x <- seq(from=0, to=max(d$time), length.out = 100)
+h0 <- dweibull(x, scale=exp(coef(f1)[1]), shape=1/f1$scale)/
+        pweibull(x, scale=exp(coef(f1)[1]), shape=1/f1$scale, lower.tail=FALSE)
+
+h1 <- dweibull(x, scale=exp(coef(f1)[1]+coef(f1)[2]),shape=1/f1$scale)/
+        pweibull(x, scale=exp(coef(f1)[1]+coef(f1)[2]), shape=1/f1$scale,
+                 lower.tail=FALSE)
+haz <- c(h0, h1)
+haz <- haz[haz != Inf]
+ymin <- min(haz)
+ymax <- max(haz)
+
+curve(dweibull(x, scale=exp(coef(f1)[1]), shape=1/f1$scale)/
+        pweibull(x, scale=exp(coef(f1)[1]), shape=1/f1$scale, lower.tail=FALSE),
+      from=0, to=max(d$time), 
+      ylab="hazard", xlab="Months", axes=F, ylim = c(ymin, ymax))
+
+curve(dweibull(x, scale=exp(coef(f1)[1]+coef(f1)[2]),shape=1/f1$scale)/
+        pweibull(x, scale=exp(coef(f1)[1]+coef(f1)[2]), shape=1/f1$scale,
+                 lower.tail=FALSE), 
+      from=0, to=max(d$time), add=T, col=2)
+axis(1,cex.axis=.9)
+axis(2,cex.axis=.9)
+box()
+legend('topright',c("ctl", "trt"), col=1:2, lty=1, cex=.9, bty='n')
+```
+
+
+## brms - aft parameterisation
+
+
+```{r}
+# these options help stan run quicker
+rstan_options(auto_write = TRUE)
+options(mc.cores = parallel::detectCores())
+
+# student_t(df = 1, location = 0, scale = NULL, autoscale = TRUE)
+prior <- c(set_prior("student_t(3,0,1)", class = "b"))
+
+f2 <- brms::brm(time | cens(cen) ~ 1 + grp,
+                data = d,
+                family = weibull(),
+                prior = prior)
+f2 <- add_criterion(f2, "waic")
+summary(f2)
+# tidybayes::get_variables(f2)
+```
+
+## parameter estimates
+
+```{r, echo = F}
+plot(f2)
+```
+
+### survival function
+
+```{r}
+
+# alternative...
+dfig <- tidybayes::tidy_draws(f2) %>% 
+  modelr::data_grid(grp = 0:1)  %>%
+  tidybayes::add_fitted_draws(f2) 
+
+
+# see https://cran.r-project.org/web/packages/brms/vignettes/brms_families.html#survival-models
+# https://en.wikipedia.org/wiki/Weibull_distribution
+# https://www.itl.nist.gov/div898/handbook/apr/section1/apr162.htm
+# 4000 x 100
+ps_mean <- fitted(f2, summary = FALSE)
+# 4000 x 2
+ps_mean <- fitted(f2, newdata = data.frame(grp = 0:1), 
+                  summary = F)
+dim(ps_mean)
+
+# 1 x 4000
+ps_shape <- as.vector(as.matrix(f2, pars = "^shape$"))
+
+get_sig <- function(x){
+  data.table(ps_mean[,x] / gamma(1 + (1/ps_shape)))
+}
+
+ps_sig <- do.call(cbind, lapply(1:2, FUN = get_sig ))
+dim(ps_sig)
+
+get_surv <- function(x){
+  
+  d <- data.table(group = rep(x-1, length(mtime)),
+                  t = 0,
+                  s_mean = 0,
+                  s_lwr = 0,
+                  s_upr = 0)
+  for(i in 1:length(mtime)){
+    # weibull specific surv function
+    surv = exp(- (mtime[i]/ps_sig[, eval(x), with = FALSE])^ps_shape)
+    d$t[i] = mtime[i]
+    d$s_mean[i] = mean(surv$V1)
+    d$.s_lwr[i] = quantile(surv$V1, 0.025)
+    d$.s_upr[i] = quantile(surv$V1, 0.975)
+  }
+  
+  d
+}
+
+mtime <- seq(0, 100, len = 100)
+s <- do.call(rbind, lapply(1:2, FUN = get_surv ))
+
+```
+
+Dots show the KM estimates.
+
+```{r, echo = F, fig.height = 5, fig.width = 5}
+ggplot(s, aes(x = t, y = s_mean, group = group, colour = paste0(group)))+
+  #geom_point(size = 0.3, alpha = 1) +
+  geom_line()+
+  geom_point(data = dkmfig, 
+             aes(x = t, y = surv, group = grp, colour = paste0(grp)), 
+             inherit.aes = F) +
+  scale_color_discrete("Group")
+```
+
+Median survival with uncertainty.
+
+```{r}
+# solve surv for t
+get_t1 <- function(p, sig, shape){
+  sig * exp( log(-log(p)) / shape )
+}
+
+
+get_t2 <- function(x, p){
+  ps_sig[, eval(x), with = FALSE] * exp( log(-log(p)) / ps_shape )
+}
+
+med <- do.call(cbind, lapply(1:2, FUN = get_t2, p = 0.5 ))
+names(med) <- c("ctl", "trt")
+med <- melt(med,  measure = c("ctl", "trt"), variable.name = "id")
+dmed <- med[, median(value), by = id]
+dmed
+```
+
+
+```{r, echo = F, fig.height = 5, fig.width = 5}
+ggplot(med, aes(x = value, group = id, colour = paste0(id)))+
+  geom_density()+
+  geom_vline(data = dmed, 
+             aes(xintercept = V1, 
+                 colour = paste0(id)), lty = 2)+
+  scale_color_discrete("Group") 
+```
+
+### posterior things
+
+```{r}
+head(fitted(f2))
+# posterior_linpred(f2)
+
+# predict responses based on fitted model
+# for each individual in the existing data what is yhat?
+pp <- as.data.table(posterior_predict(f2))
+pp <- melt(pp,  measure = patterns("^V"), variable.name = "id")
+pp[, id := as.numeric(gsub("V", "", pp$id))]
+pp[, grp := rep(0:1, each = nrow(pp)/2)]
+```
+
+The treatment group looks like they have slightly longer time to event.
+
+```{r, echo = F, fig.height = 5, fig.width = 5}
+ggplot(data = pp, aes(x = value, colour = paste0(grp)))+
+  geom_density() +
+  scale_color_discrete("Group")+
+  scale_x_continuous(limits = c(0, 300))
+
+```
+
+Generate data from the posterior predictive (posterior_predict) using a new design matrix for the remaining people to be enrolled. This gives the events times conditional on the current model estimates (and data). Apply censoring as before. Then, the idea is to fit the existing model specification to this new data and repeat that process a lot of times. The proportion that show a significant treatment effect gives you the predicted probability of success.
+
+```{r}
+# for new data (design matrix) e.g. predict the next 100
+d3 <- copy(d)
+d3$cen <- 0
+d3$time <- 0
+d3$event <- 0
+
+d3$time <- as.numeric(posterior_predict(f2, newdata = d3, nsamples = 1))
+
+# censor based on time
+d3[, cen := as.numeric(d3$time > 40)]
+d3[cen == 1, time := 40]
+d3[, event := 1-cen]
+
+# now model and see if the grp term is signif
+
+```
+
+
+### hazard
+
+
+
+
+### hypotheses  
+
+```{r}
+hypothesis(f2, "grp > 0", class = "b")
+```
+
+### model assessment/comparisons
+
+leave-one-out cross-validation
+
+```{r}
+(loo2 <- loo::loo(f2))
+```
+
+# Summary
+
+Looked at weibull fitted to data generated under piecewise exponential. Used frequentist and bayesian. Computed survival curves.
