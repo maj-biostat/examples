@@ -1,5 +1,5 @@
 ---
-title: "Survival cheatsheet"
+title: "Survival cheatsheet 1"
 subtitle: "`r knitr::current_input(dir = TRUE)`"
 author: "Mark Jones"
 date: "`r Sys.time()`"
@@ -86,12 +86,12 @@ Therefore, if the derivative of $exp(-u^a)$ is $-au^{a-1} exp(-u^a)$ then the in
 \begin{aligned}
   F(t) &= \int_0^t \frac{a}{b} u^{a-1} exp(-u^a) b du \\
        &= -exp(-u^a) \big|_0^t \\
-       &= -exp(-\frac{x}{b}^a) \big|_0^t \\
-       &= -exp(-\frac{t}{b}^a) - - 1 \\
-       &= 1 - exp(-\frac{t}{b}^a)
+       &= -exp(-(\frac{x}{b})^a) \big|_0^t \\
+       &= -exp(-(\frac{t}{b})^a) - - 1 \\
+       &= 1 - exp(-(\frac{t}{b})^a)
 \end{aligned}
 
-The survival function is $S(t)=1-F(t) =  exp(-\frac{t}{b}^a)$ and the hazard function is:
+The survival function is $S(t)=1-F(t) =  exp(-(\frac{t}{b})^a)$ and the hazard function is:
 
 \begin{aligned}
   h(t) &= \frac{(a/b)(t/b)^{a-1} exp(-(t/b)^a)}{exp(-\frac{t}{b}^a)} \\
@@ -101,15 +101,32 @@ The survival function is $S(t)=1-F(t) =  exp(-\frac{t}{b}^a)$ and the hazard fun
 
 ## Weibull (mark 2 & 3)
 
-Another parameterisation of Weibull (as used by JAGS) is:
+From above: 
 
 \begin{aligned}
-  f(t) &= b  kx^{k-1} exp (-bx^k) \\
+  h(t) &= (a/b)(t/b)^{a-1} \\
+  &= \frac{a}{b}t^{a-1}(\frac{1}{b})^{a-1} \\
+  &= \frac{a}{b^a} t^{a-1}
 \end{aligned}
 
-In this form $b > 0$ is the scale and $k > 0$ is the shape.
+Substitute $\lambda = \frac{1}{b^a}$ gives $h(t) = \lambda a t^{a-1}$.
+
+gives parameterisation of Weibull (as used by JAGS and flexsurv) is:
+
+\begin{aligned}
+  f(t) &= \lambda a t^{a-1} exp (-\lambda t^a) &&= (a/b)(t/b)^{a-1} exp(-(t/b)^a) \\
+  F(t) &= 1 - exp(-\lambda t^a)                &&= 1 - exp(-(\frac{t}{b})^a) \\
+  S(t) &= exp(-\lambda t^a)                    &&= exp(-(\frac{t}{b})^a) \\
+  h(t) &= \lambda a t^{a-1}                    &&= (a/b)(t/b)^{a-1} \\
+  H(t) &= \lambda t^a                          &&= (\frac{t}{b})^b  
+\end{aligned}
+
 
 https://stats.stackexchange.com/questions/18550/how-do-i-parameterize-a-weibull-distribution-in-jags-bugs
+
+Note that if you replace $b$ with $exp(-mu/a)$ in the stan parameterisation and substitute $\lambda$ with $exp(\mu)$ in the JAGs parameterisation then you get the two forms are equivalent.  
+
+
 
 I believe that `survreg` uses:
 

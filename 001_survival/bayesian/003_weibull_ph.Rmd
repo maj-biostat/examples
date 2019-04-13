@@ -1,0 +1,260 @@
+---
+title: "Proportional hazards model - weibull"
+subtitle: "`r knitr::current_input(dir = TRUE)`"
+author: "Mark Jones"
+date: "`r Sys.time()`"
+output:
+  html_document:
+    number_sections: yes
+    self_contained: yes
+    theme: united
+    toc: yes
+    toc_depth: 3
+geometry: left=0.2cm,right=0.2cm,top=1cm,bottom=1cm
+editor_options:
+  chunk_output_type: console
+---
+
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+suppressPackageStartupMessages(library(rstan))
+suppressPackageStartupMessages(library(dplyr))
+suppressPackageStartupMessages(library(nphsim))
+suppressPackageStartupMessages(library(survival))
+suppressPackageStartupMessages(library(flexsurv))
+suppressPackageStartupMessages(library(data.table))
+suppressPackageStartupMessages(library(brms))
+suppressPackageStartupMessages(library(bayesplot))
+```
+
+# Preamble
+
+Data generation using piecewise exponential specified with three baseline hazards.
+
+```{r, echo = T}
+mypwexp <- function(n, rates, intervals){
+  
+  k <- length(rates)
+  tx <- 0
+  j <- 1
+  times <- array(0,n)
+  timex <- cumsum(intervals)
+  indx <- array(TRUE,n)
+  for(i in 1:k){
+    nindx <- sum(indx)
+    if (nindx==0) break
+    increment <- rexp(nindx,rates[i])
+    times[indx] <- tx + increment
+    if (i<k){
+      tx <- timex[i]
+      indx <- (times > timex[i])
+    }
+  }
+  return(times)
+  
+}
+
+gendat <- function(){
+  rates <- c(0.05, 0.04, 0.03, 0.03, 0.02)
+  intervals <- c(6, 12, 24, 36)
+  n <- 100
+  x0 <- mypwexp(n/2, rates, intervals)
+  x1 <- mypwexp(n/2, rates - 0.015, intervals)
+  d <- data.table(cen = rep(0, n), 
+                  time = c(x0, x1),
+                  grp = rep(0:1, each = n/2))
+  d[, cen := as.numeric(d$time > 40)]
+  d[cen == 1, time := 40]
+  d[, event := 1-cen]
+  
+  # long format - don't need this, it is just for ref
+  # split at each timepoint 
+  d2 <- survSplit(data = d, 
+                  cut = intervals, 
+                  episode = "intvl",
+                  start="start", 
+                  id = "id", 
+                  end="time", 
+                  event="event")
+  
+  d2 <- d2 %>%
+    dplyr::mutate(exposure = time - start,
+                  intvl = factor(intvl,  
+                             labels = paste("_", c(0,intervals), "_", 
+                                            c(intervals,1000), sep="")))
+  d
+}
+d <- gendat()
+```
+
+KM plot. 
+
+```{r, echo = F}
+fit <- survfit(Surv(time, event) ~ grp, data = d)
+plot(fit, lty = 1:2,col=1:2)
+legend(
+  "topright",
+  legend=c("PWE0", "PWE1"),
+  col=1:2,
+  lty=1:2,
+  horiz=FALSE,
+  bty='n')
+dkmfig <- data.table(t = fit$time,
+                     surv = fit$surv,
+                     grp = c(rep(0, fit$strata[1]), rep(1, fit$strata[2])))
+```
+
+
+# Modelling
+
+## ph model
+
+If the hazard function factorises such that the covariates have a multiplicative effect on the hazard function then we have a PH model. It is common to use $exp(x_j \beta)$.
+
+\begin{aligned}
+h(t_j) &= h_0(t)g(x_j) \\
+ &= h_0(t) exp(x_j \beta)
+\end{aligned}
+
+`flexsurv` is a much more sensible package than `survival`. It provides a PH parameterisation for weibull.
+
+The coefficient for the `grp` estimate is negative which implies the risk of an event is decreased in the treatment group. The exponentiated parameter gives the multiplicative difference between the hazards in the two groups.
+
+```{r}
+
+# different parameterisation as per rweibull (affects shape and scale).
+fs1 <- flexsurvreg(Surv(time, event) ~ grp, dist = "weibullPH", data = d)
+print(fs1)
+
+# the positive coefficient for grp imply longer time to event
+# in the treatment group 
+# the tte in the trt group is stretched by a factor of 1.54
+exp(coef(fs1))
+```
+
+
+## stan - ph formulation
+
+The scale parameter gets modified by the covariates.
+
+```{r}
+# these options help stan run quicker
+rstan_options(auto_write = TRUE)
+options(mc.cores = parallel::detectCores())
+d <- gendat()
+sdat <- list(N = nrow(d), 
+             M = 1,
+             X = array(d$grp, dim = c(nrow(d), 1)), 
+             y = d$time,
+             event = d$event)
+
+# Translate the Stan program to C++ code
+c1 <- rstan::stanc(file = "003_weibull_ph_mod2.stan") 
+# Construct the model from which to draw samples.
+m1 <- rstan::stan_model(file = "003_weibull_ph_mod2.stan", verbose = F) 
+# Might give the dreaded "There were 5 divergent transitions after warmup" wanring.
+f2 <- rstan::sampling(m1, data = sdat, iter = 4000, 
+                      chains = 1, thin = 1,
+                      #seed = 99,
+                      control = list(adapt_delta = 0.99))
+
+print(f2, digits = 3)
+fs1 <- flexsurvreg(Surv(time, event) ~ grp, dist = "weibullPH", data = d)
+print(fs1)
+
+# the intercept from the stan model should be about log(scale) from
+# the flexsurvreg model. while the output from flexsurv shows the 
+# exponentiated scale the object actually stores it without 
+# exponentiating so stan model intercept should be about:
+coef(fs1)["scale"]
+```
+
+## diagnostics
+
+`bayesplot`  nuts diagnostics need more information than simply the posterior they need the log of the posterior density for each draw and some NUTS-specific diagnostic values.
+
+```{r}
+post <- as.array(f2)
+# post is a multidim array.
+
+lp <- log_posterior(f2)
+mpars <- nuts_params(f2)
+
+# https://cran.r-project.org/web/packages/bayesplot/vignettes/visual-mcmc-diagnostics.html#divergent-transitions
+mcmc_parcoord(post, pars = c("intercept", "beta[1]", "alpha"), np = mpars)
+
+pairs(f2, pars = c("intercept", "beta[1]", "alpha"), las = 1)
+
+mcmc_scatter(post, pars = c("intercept", "alpha"), 
+  transform = list(alpha = "log"), # can abbrev. 'transformations'
+  np = mpars
+)
+```
+
+## parameter estimates
+
+```{r, fig.width = 4, fig.height=4}
+mcmc_intervals(post, pars = c("beta[1]", "intercept"))
+```
+
+```{r, fig.width = 4, fig.height=4}
+mcmc_hist(post, pars = c("beta[1]", "intercept"))
+```
+
+```{r, fig.width = 4, fig.height=4}
+mcmc_trace(post, pars = c("beta[1]", "intercept"))
+```
+
+### survival function
+
+I thought that the survival function for the stan parameterisation is $exp(-(\frac{t}{b})^a)$ where $a$ is the shape and $b$ is the scale. However, when you use $b = exp(\mu/shape)$ where $\mu = X\beta$ you actually have a survival function: $S(t) = exp(-b t^a)$. Why this is, I do not know and haven't been able to figure out.
+
+```{r}
+post <- as.matrix(f2)
+
+wsurv_mean <- function(x, g, FUN = "mean", ...){
+  t =  mtime[x]
+  mu <- post[,"intercept"] + g * post[,"beta[1]"]
+  shape <- post[, "shape"]
+  # 
+  scale <- exp(mu)
+  match.fun(FUN)(exp(-scale* t^shape))
+}
+
+mtime <- seq(0, 100, len = 100)  
+s0 <- unlist(lapply(1:length(mtime), wsurv_mean, g = 0))
+s1 <- unlist(lapply(1:length(mtime), wsurv_mean, g = 1))
+  
+dfig <- data.frame(t = rep(mtime, len = 2 * length(mtime)),
+                   grp = rep(0:1, each = length(mtime)),
+                   surv = c(s0, s1))  
+
+```
+
+
+
+Dots show the KM estimates.
+
+```{r, echo = F, fig.height = 5, fig.width = 5}
+ggplot(dfig, aes(x = t, y = surv, group = grp, colour = paste0(grp)))+
+  #geom_point(size = 0.3, alpha = 1) +
+  geom_line()+
+  geom_point(data = dkmfig,
+             aes(x = t, y = surv, group = grp, colour = paste0(grp)),
+             inherit.aes = F) +
+  scale_color_discrete("Group") +
+  scale_y_continuous(lim=c(0, 1))
+```
+
+
+
+
+### posterior things
+
+```{r}
+
+```
+
+
+
