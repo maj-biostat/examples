@@ -1,0 +1,137 @@
+---
+title: "Survival cheatsheet"
+subtitle: "`r knitr::current_input(dir = TRUE)`"
+author: "Mark Jones"
+date: "`r Sys.time()`"
+output:
+  html_document:
+    number_sections: yes
+    self_contained: yes
+    theme: united
+    toc: yes
+    toc_depth: 3
+geometry: left=0.2cm,right=0.2cm,top=1cm,bottom=1cm
+editor_options:
+  chunk_output_type: console
+---
+
+
+```{r setup, include=FALSE}
+# setwd("~/Documents/examples/001_survival")
+knitr::opts_chunk$set(echo = TRUE)
+suppressPackageStartupMessages(library(rstan))
+suppressPackageStartupMessages(library(dplyr))
+suppressPackageStartupMessages(library(nphsim))
+suppressPackageStartupMessages(library(survival))
+suppressPackageStartupMessages(library(data.table))
+suppressPackageStartupMessages(library(brms))
+```
+
+# Intro
+
+Start with time, $T$ (>0), a RV being the time to event. The distribution of $T$ can be specified as the pdf, hazard function or survival function.
+
+Let $S(t) = \mathbb{P}(T>0) = 1 - F(t) = \int_t^\infty f(u) du$ be the survival function. 
+
+The pdf is then $f(t) = -dS(t)/dt = -S'(t)$. 
+
+The hazard function $h(t) = f(t)/S(t) = -d log F(t) / dt$ is the instantaneous failure rate for items that have survived until time $t$. 
+
+The integral of $h$ is the cumulative hazard function:
+
+\begin{aligned}
+  H(t) &= \int_0^t h(u) du \\
+       &= \int_0^t f(u)/S(u) du \\ 
+       &= \int_0^t 1/S(u) (d/du S(u)) du \\
+       &= -ln(S(t))
+\end{aligned}
+
+So $S(t) = exp(-H(t))$.
+
+## Weibull
+
+> More distribution functions for log-normal, gamma etc can be found in Lutian_SurvDistributions.pdf under survival articles.
+
+Has different parameterisations. The one that both stan and `rweibull` use is:
+
+\begin{aligned}
+  f(t) &= (a/b)(t/b)^{a-1} exp(-(t/b)^a)
+\end{aligned}
+
+This is the same as the parameterisation discussed in Wikipedia (https://en.wikipedia.org/wiki/Weibull_distribution).
+
++ $a$ is the shape parameter
++ $b$ is the scale parameter > 0
+
+When $a$ is 1, the Weibull is just an exponential dist. The mean/expectation is $b \Gamma(1 + 1/a)$ and median is $b(log 2)^{1/k}$.
+
+Use $u = \frac{x}{b}$ so $\frac{du}{dx}= \frac{1}{b}$ and $dx = b du$.
+
+\begin{aligned}
+  F(t) &= \int_0^t (a/b)(x/b)^{a-1} exp(-(x/b)^a) dx \\
+  F(u) &= \int_0^t \frac{a}{b} u^{a-1} exp(-u^a) b du \\
+       &= \int_0^t a u^{a-1} exp(-u^a) du \\
+\end{aligned}
+
+The $exp(-u^a)$ looks wily. What is its derivative?
+
+Let $s = -u^a$ so $\frac{ds}{du} = -au^{a-1}$
+
+If $g = exp(s)$ then $\frac{dg}{ds} = exp(s)$
+
+So $\frac{dg}{du} = -au^{a-1} exp(-u^a)$, but this is just our integral!
+
+Therefore, if the derivative of $exp(-u^a)$ is $-au^{a-1} exp(-u^a)$ then the intergral of $au^{a-1} exp(-u^a)$ is $-exp(-u^a)$. We can use this knowledge to evaluate the integral over the bounds of interest.
+
+\begin{aligned}
+  F(t) &= \int_0^t \frac{a}{b} u^{a-1} exp(-u^a) b du \\
+       &= -exp(-u^a) \big|_0^t \\
+       &= -exp(-\frac{x}{b}^a) \big|_0^t \\
+       &= -exp(-\frac{t}{b}^a) - - 1 \\
+       &= 1 - exp(-\frac{t}{b}^a)
+\end{aligned}
+
+The survival function is $S(t)=1-F(t) =  exp(-\frac{t}{b}^a)$ and the hazard function is:
+
+\begin{aligned}
+  h(t) &= \frac{(a/b)(t/b)^{a-1} exp(-(t/b)^a)}{exp(-\frac{t}{b}^a)} \\
+       &= (a/b)(t/b)^{a-1}
+\end{aligned}
+
+
+## Weibull (mark 2 & 3)
+
+Another parameterisation of Weibull is:
+
+\begin{aligned}
+  f(t) &= b  kx^{k-1} exp (-bx^k) \\
+\end{aligned}
+
+In this form $b > 0$ is the scale and $k > 0$ is the shape.
+
+I believe that `survreg` uses:
+
+\begin{aligned}
+  f(t) &= \lambda \gamma (\lambda t)^{\gamma-1} exp (-(\lambda t)^\gamma) \\
+  h(t) &= \lambda \gamma (\lambda t)^{\gamma-1} \\
+  S(t) &= exp(-(\lambda t)^{\gamma})
+\end{aligned}
+
+but i really need to check the code to confirm this.
+
+From rdocs, the mapping to `survreg` parameters is:
+
+> survreg's scale = 1/(rweibull shape) = 1/a
+
+> survreg's intercept = log(rweibull scale) = log(b)
+
+If $a_s$ and $b_s$ denote the shape and scale params reported in the summary from `survreg` then $a = 1/b_s$ and $b = exp(a_s)$ where the $a$ and the $b$ are from the first parameterisation given.
+
+
+
+# Fin
+
+
+
+
+
