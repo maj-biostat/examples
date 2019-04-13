@@ -101,13 +101,15 @@ The survival function is $S(t)=1-F(t) =  exp(-\frac{t}{b}^a)$ and the hazard fun
 
 ## Weibull (mark 2 & 3)
 
-Another parameterisation of Weibull is:
+Another parameterisation of Weibull (as used by JAGS) is:
 
 \begin{aligned}
   f(t) &= b  kx^{k-1} exp (-bx^k) \\
 \end{aligned}
 
 In this form $b > 0$ is the scale and $k > 0$ is the shape.
+
+https://stats.stackexchange.com/questions/18550/how-do-i-parameterize-a-weibull-distribution-in-jags-bugs
 
 I believe that `survreg` uses:
 
