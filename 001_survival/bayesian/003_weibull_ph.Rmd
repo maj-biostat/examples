@@ -136,7 +136,19 @@ exp(coef(fs1))
 
 ## stan - ph formulation
 
-The scale parameter gets modified by the covariates.
+The pdf for weibull in stan is:
+
+\begin{aligned}
+f(t) = (a/b)(t/b)^{a-1}exp(-(t/b)^a)
+\end{aligned}
+
+The average survival time increases with an increasing values of the scale (b) parameter. So, the scale parameter is the one that is modelled with covariates. Typically like this:
+
+\begin{aligned}
+b_i = exp(-\frac{\mu + X_i'\beta}{b})
+\end{aligned}
+
+A positive $\beta$ means a shorter average survival time with a unit increase in $X$. 
 
 ```{r}
 # these options help stan run quicker
@@ -182,12 +194,12 @@ lp <- log_posterior(f2)
 mpars <- nuts_params(f2)
 
 # https://cran.r-project.org/web/packages/bayesplot/vignettes/visual-mcmc-diagnostics.html#divergent-transitions
-mcmc_parcoord(post, pars = c("intercept", "beta[1]", "alpha"), np = mpars)
+mcmc_parcoord(post, pars = c("intercept", "beta[1]", "shape"), np = mpars)
 
-pairs(f2, pars = c("intercept", "beta[1]", "alpha"), las = 1)
+pairs(f2, pars = c("intercept", "beta[1]", "shape"), las = 1)
 
-mcmc_scatter(post, pars = c("intercept", "alpha"), 
-  transform = list(alpha = "log"), # can abbrev. 'transformations'
+mcmc_scatter(post, pars = c("intercept", "shape"), 
+  #transform = list(alpha = "log"), # can abbrev. 'transformations'
   np = mpars
 )
 ```
@@ -251,6 +263,8 @@ ggplot(dfig, aes(x = t, y = surv, group = grp, colour = paste0(grp)))+
 
 
 ### posterior things
+
+work with the predictions as per weibull aft to example model parameter estimates from model fitted to new data.
 
 ```{r}
 
