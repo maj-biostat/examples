@@ -57,3 +57,30 @@ Note:
 + You may need to go through the process multiple times and you may need to do an $I$ substitution if you end up where you started.
 
 
+# Integrals of form $\int \frac{f'(x)}{f(x)}dx$ or $\int f'(x)f(x)dx$
+
+Consider $\int \frac{2x + 3}{x^2 + 3x -5} dx$. Notice that if we set the denominator $z=x^2 + 3x -5$ then $\frac{dx}{dz} = 2x + 3$. 
+
+We can pretend $dx =(2x + 3) dz$. Substitution gives
+
+\begin{aligned}
+  \int \frac{2x + 3}{x^2 + 3x -5} dx  &= \int \frac{1}{z} dz \\
+  &= log(z) + c
+\end{aligned}
+
+Substitute again: $\int \frac{2x + 3}{x^2 + 3x -5} dx = log(x^2 + 3x -5) + c$.
+
+> Any integral of the form $\int \frac{f'(x)}{f(x)}dx$ has the solution $log(f(x)) + c$.
+
+
+Similarly consider $\int (x^2+7x-4)(2x+7) dx$. Notice that if $z = x^2+7x-4$, $\frac{dz}{dx} = 2x + 7$. Substitution gives $\int (x^2+7x-4)(2x+7) dx = \int z dz = \frac{z^2}{2}+c$.
+
+Substitute again: $\int (x^2+7x-4)(2x+7) dx = \frac{(x^2+7x-4)^2}{2}+c$.
+
+
+
+
+
+
+
+
