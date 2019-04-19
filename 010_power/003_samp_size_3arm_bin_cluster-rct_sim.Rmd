@@ -1,0 +1,378 @@
+---
+title: "Simulation sample size in cluster RCT with binary endpoint and 3 arms"
+subtitle: "`r knitr::current_input(dir = TRUE)`"
+author: "Mark Jones"
+date: "`r Sys.time()`"
+output:
+  html_document:
+    number_sections: yes
+    self_contained: yes
+    theme: united
+    toc: yes
+    toc_depth: 3
+geometry: left=0.2cm,right=0.2cm,top=1cm,bottom=1cm
+editor_options:
+  chunk_output_type: console
+---
+
+<style type="text/css">
+.main-container {
+  max-width: 1800px;
+  margin-left: auto;
+  margin-right: auto;
+}
+</style>
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE, fig.path = 'figs/')
+suppressPackageStartupMessages(library(dplyr))
+suppressPackageStartupMessages(library(tidyr))
+suppressPackageStartupMessages(library(ggplot2))
+suppressPackageStartupMessages(library(knitr))
+suppressPackageStartupMessages(library(kableExtra))
+suppressPackageStartupMessages(library(data.table))
+suppressPackageStartupMessages(library(compiler))
+suppressPackageStartupMessages(library(geepack))
+suppressPackageStartupMessages(library(doParallel))
+suppressPackageStartupMessages(library(foreach))
+suppressPackageStartupMessages(library(beepr))
+suppressPackageStartupMessages(library(clusterPower))
+suppressPackageStartupMessages(library(randomizeR))
+suppressPackageStartupMessages(library(multcomp))
+suppressPackageStartupMessages(library(doBy))
+
+
+
+
+ggplot2::theme_set(ggplot2::theme_bw())
+ggplot2::theme_update(text = element_text(size = 10))
+ggplot2::theme_update(legend.position = "top")
+#ggplot2::theme_update(legend.title = element_blank())
+ggplot2::theme_update(axis.text.x = element_text(size = 10))
+ggplot2::theme_update(axis.text.y = element_text(size = 10))
+
+prob_to_odd <- cmpfun(function(x){
+  return(x/(1-x))
+})
+
+inv_logit <- cmpfun(function(x){
+  return(exp(x)/(1+exp(x)))
+})
+odd <- cmpfun(function(p){p/(1-p)})
+# Work|Right|Fast
+# rmarkdown::render("simulation_report.Rmd", clean=TRUE)
+```
+
+# Data generation
+
+Data model follows. Indicators for treatment group. Include SES and HEPC (hep-c clinic). Cluster level random intercept.
+
+\begin{aligned}
+logit(p_{ij}) = \beta_0 + \beta_1 \text{I(trt1)}_{ij} + \beta2 \text{I(trt2)}_{ij} + \beta_3 \text{SES}_{ij} + \beta_4 \text{hepc}_{ij} + \text{clust}_j
+\end{aligned}
+
+```{r}
+
+create_base <- cmpfun(function(pars_id, rep_id, 
+                               n_clusters, cluster_sizes){
+  
+  stopifnot(n_clusters == length(cluster_sizes))
+  
+  ids <- unlist(lapply(seq(1, length(cluster_sizes)), 
+                       function(x) 1:cluster_sizes[x] ))
+  d0 <- data.table(pars_id = pars_id,
+                   rep_id = rep_id,
+                   id = ids)
+  clustids <- unlist(lapply(seq(1, n_clusters), 
+                            function(x) rep(x, each = cluster_sizes[x]) ))
+  d0[, clustid := clustids]
+  d0[, subjid := paste0(clustid, ":", id)]
+  d0
+})
+
+
+gen_dat <- cmpfun(function(pars_id=1, rep_id=1, 
+                           n_clusters = 5, 
+                           n_subjs_per_clust = 5,
+                           n_subjs_per_clust_cv = 0.5,
+                           p0 = 0.30, 
+                           beta1 = 0.3,   # trt1
+                           beta2 = 0.3,   # trt2
+                           beta3 = 0.3,   # ses
+                           beta4 = 0.3,   # hc serv
+                           sig_0 = 0.8){
+  
+  # static design matrix - same for all datasets
+  sig_siz <- n_subjs_per_clust * n_subjs_per_clust_cv
+  # the plus 1 deals with zeros
+  cluster_sizes <- abs(ceiling(rnorm(n_clusters, n_subjs_per_clust, sig_siz)))+1
+  # dput(cluster_sizes)
+  d0 <- create_base(pars_id, rep_id, n_clusters, cluster_sizes)
+  n <- nrow(d0)
+  stopifnot(n == sum(cluster_sizes))
+  
+  # individual level covariate (centered and standardised)
+  # could apply non-deterministic trt allocation
+  prac_ses <- unlist(lapply(seq(1, n_clusters), 
+                            function(x) rep(sample(1:8, 1), 
+                                            each = cluster_sizes[x]) ))
+  hep_c_serv <- unlist(lapply(seq(1, n_clusters), 
+                              function(x) rep(rbinom(1, 1, prob = 0.25), 
+                                              each = cluster_sizes[x]) ))
+
+  c <- as.numeric(genSeq(rpbrPar(n_clusters, 3, K = 3))@M)
+
+  stopifnot(length(c) == n_clusters)
+  stopifnot(length(cluster_sizes) == n_clusters)
+  trt <- unlist(lapply(seq(1, n_clusters), function(x) rep(c[x], 
+                                                           each = cluster_sizes[x]) ))
+
+  stopifnot(length(trt) == nrow(d0))
+  trtm <- model.matrix(~ factor(trt))
+  
+  d0[, prac_ses := prac_ses]
+  d0[, hep_c_serv := hep_c_serv]
+  d0[, trt := as.factor(trt)]
+  d0[, trt1 := as.numeric(trtm[,2])]
+  d0[, trt2 := as.numeric(trtm[,3])]
+
+  clust_int <- unlist(lapply(seq(1, n_clusters), 
+                             function(x) rep(rnorm(1, sd = sig_0), 
+                                             each = cluster_sizes[x]) ))
+  d0[, clust_int := clust_int]
+
+  beta0 <- log(prob_to_odd(p0))
+
+  d0[, eta := beta0 + beta1*trt1 + beta2*trt2 + beta3*prac_ses + beta4*hep_c_serv + clust_int]
+  d0[, p := inv_logit(d0$eta)]
+  d0[, y := rbinom(nrow(d0), 1, prob = d0$p)]
+
+  # i should probably only return the stochastic parts
+  d0
+})
+```
+
+Random effects $\sigma_0$ set to 0.35, 0.8, 1.5. In a fully unconditional model random intercept model this would yield ICCs of 0.04, 0.17 and 0.38.
+
+```{r}
+iccme <- function(u){(u^2)/(u^2 + (pi^2)/3)}
+sigme <- function(rho){ sqrt((rho*(pi^2)/3)/(1-rho))}
+sig_u <- c(0.18, 0.42, 0.6)
+iccme(sig_u)
+```
+
+
+```{r}
+sig_u <- c(0.18, 0.42, 0.6)
+n_clusters <- 30
+n_subjs_per_clust <- 20
+n_subjs_per_clust_cv <- 0.5
+p0 <- 0.2
+beta1 <- 0.5
+beta2 <- 0.55
+
+d <- gen_dat(1, 1, n_clusters, n_subjs_per_clust, 
+             beta1 = beta1, beta2 = beta2, sig_0 = sig_u[1])
+```
+
+# Generate datasets
+
+```{r}
+replicate <- 1:500
+n_clusters <- c(30, 50, 100)
+n_subjs_per_clust <- c(30, 50, 100)
+n_subjs_per_clust_cv = 0.5
+sig_0 <- c(0.18, 0.42, 0.6)
+p0 <- c(0.1, 0.2, 0.3)
+# treatment effect
+beta1 <- c(0.4, 0.5)
+beta2 <- c(0.45, 0.55)
+
+par_space <- data.table(expand.grid(replicate = replicate,
+                                    n_clusters = n_clusters, 
+                                    n_subjs_per_clust = n_subjs_per_clust,
+                                    n_subjs_per_clust_cv = n_subjs_per_clust_cv,
+                                    p0 = p0,
+                                    beta1 = beta1,
+                                    beta2 = beta2,
+                                    sig_0 = sig_0))
+
+
+par_dim <- nrow(par_space)/max(replicate)
+par_space[,pars_id := rep(1:par_dim, each = max(replicate))]   
+setkey(par_space, pars_id, replicate)
+
+
+# now remove out any duplicates that we do not want
+# e.g. we could remove the case where both treatments are equal
+# par_space <- par_space[beta1 != beta2,]
+
+
+
+```
+
+Could pre-generate data like this and store.
+
+```{r, eval = F}
+gen_dat_wrap <- function(x){
+  pars <- par_space[x,]
+  
+  gen_dat(pars_id=pars[,pars_id], 
+               rep_id=pars[,replicate], 
+               n_clusters = pars[,n_clusters], 
+               n_subjs_per_clust = pars[,n_subjs_per_clust],
+               n_subjs_per_clust_cv = pars[,n_subjs_per_clust_cv],
+               p0 = pars[,p0],
+               beta1 = pars[,beta1],   # trt1
+               beta2 = pars[,beta2],   # trt2
+               sig_0 = pars[,sig_0])
+}
+
+set.seed(10001)
+l <- lapply(1:nrow(par_space), gen_dat_wrap)
+```
+
+# Simulation
+ 
+```{r, eval = T}
+starttime <- Sys.time()
+
+cl <- makeCluster(parallel::detectCores() - 3, outfile="")
+registerDoParallel(cl)
+# registerDoSEQ()
+
+results <- foreach(i = 1:nrow(par_space),
+                   .errorhandling = 'pass',
+                   .export = c("prob_to_odd", "inv_logit", "par_space"),
+                   .packages=c("MASS", "data.table", "compiler", 
+                               "geepack", "doBy", "randomizeR", "stats")
+                   #.options.snow=opts,
+                   ) %dopar%{
+ 
+  pars <- par_space[i,]
+  
+  d <- gen_dat(pars_id=pars[,pars_id], 
+               rep_id=pars[,replicate], 
+               n_clusters = pars[,n_clusters], 
+               n_subjs_per_clust = pars[,n_subjs_per_clust],
+               n_subjs_per_clust_cv = pars[,n_subjs_per_clust_cv],
+               p0 = pars[,p0],
+               beta1 = pars[,beta1],   # trt1
+               beta2 = pars[,beta2],   # trt2
+               sig_0 = pars[,sig_0])
+  
+  # d0[, eta := beta0 + beta1*trt1 + beta2*trt2 + beta3*prac_ses + beta4*hep_c_serv + clust_int]
+  
+  g1 <- geepack::geeglm(y ~ trt + prac_ses + hep_c_serv, 
+                        data = d, family = binomial,
+                        id = clustid, corstr = "exchangeable")
+  
+  L <- matrix(c(-1,1,0,0,0,
+                -1,0,1,0,0,
+                0,-1,1,0,0), nrow = 3, byrow = T)
+  p <- p.adjust(esticon(g1, L=L)[,"Pr(>|X^2|)"], method = "bonferroni")
+
+  if(all(p < 0.05)){
+    return(T)
+  } else{
+    return(F)
+  }
+  
+}
+
+stopCluster(cl)
+endtime <- Sys.time()
+difftime(endtime, starttime, units = "hours")
+par_space[,win := unlist(results)]
+```
+
+Summarise results.
+
+```{r}
+#par_space <- readRDS("results.RDS")
+dpwr <- par_space[, .(pwr = 100*mean(win)), by = c("pars_id")]
+dpwr <- merge(dpwr, unique(par_space[, .(pars_id, n_clusters,
+                                         n_subjs_per_clust, 
+                                         n_subjs_per_clust_cv, 
+                                         p0, beta1, beta2, sig_0
+                                         )]))
+
+
+dpwr %>% dplyr::select(-pars_id) %>% 
+  kable(caption = "Table 1. Power",
+      col.names = c("Power", "Clusters", "Cluster size", "Size CV", 
+                    "$p_0$", "$\beta_1$","$\beta_2$", "$\\sigma_u$"),escape = FALSE) %>%
+  kable_styling(bootstrap_options = c("striped", "hover", "condensed"),
+                full_width = F, position = "left",
+                font_size = 12,
+                latex_options = "hold_position")
+# beepr::beep(6)
+```
+
+
+
+
+# Visualisation
+
+The legend shows cluster size (coefficient of variation) as colour. Linetype shows the odds ratios for the first treatment group (e.g. funding to practice) and the second treatment group (e.g. funding to practice and participant) relative to the control condition.
+
+```{r, fig.height=8, fig.width=7, echo = F}
+dpwr[,icc := sig_0^2/(sig_0^2 + (pi^2)/3)]
+
+
+ggplot(data = dpwr, aes(x= n_clusters, 
+                        y = pwr, 
+                        colour = paste0(n_subjs_per_clust, " (",
+                                       n_subjs_per_clust_cv, ")",
+                                       sep = "" ),
+                        lty = sprintf("%.3f, %.3f", 
+                                      exp(beta1), exp(beta2)),
+                        group = paste(n_subjs_per_clust, 
+                                       n_subjs_per_clust_cv, 
+                                       beta1,  
+                                       beta2, 
+                                       sep = ", " )   )) +
+  geom_point()+
+  geom_line()+
+  scale_linetype("ORs (trt)")+
+  scale_color_discrete("Cluster size")+
+  scale_y_continuous("Power",lim = c(0, 100))+
+  scale_x_continuous("Number of clusters")+
+  facet_grid(paste0("ICC ", round(icc, 3)) ~ 
+               paste0("Baseline prev ", p0))+
+  guides(colour=guide_legend(nrow=2,byrow=TRUE))+
+  guides(lty=guide_legend(nrow=2,byrow=TRUE))
+```
+
+# ClusterPower
+
+A few arbitrary points from cluster power package. A bit different, presumably because I had an additional covariate in the model.
+
+```{r}
+crtpwr.2prop(alpha = 0.05, power = NA, m = 50, n = 50, cv = 0,
+  p1 = 0.13, p2 = 0.1, icc = 0.012, pooled = F, p1inc = T,
+  tol = .Machine$double.eps^0.25)
+
+crtpwr.2prop(alpha = 0.05, power = NA, m = 50, n = 100, cv = 0,
+  p1 = 0.13, p2 = 0.1, icc = 0.012, pooled = F, p1inc = T,
+  tol = .Machine$double.eps^0.25)
+
+crtpwr.2prop(alpha = 0.05, power = NA, m = 30, n = 100, cv = 0,
+  p1 = 0.25, p2 = 0.2, icc = 0.046, pooled = F, p1inc = T,
+  tol = .Machine$double.eps^0.25)
+
+crtpwr.2prop(alpha = 0.05, power = NA, m = 50, n = 30, cv = 0,
+  p1 = 0.37, p2 = 0.3, icc = 0.163, pooled = F, p1inc = T,
+  tol = .Machine$double.eps^0.25)
+```
+
+
+
+```{r, eval = F, echo = F}
+
+inv_logit(log(prob_to_odd(0.1))+0.3)
+
+```
+
+
+

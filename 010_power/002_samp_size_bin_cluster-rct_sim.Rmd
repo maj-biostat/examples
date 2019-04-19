@@ -290,4 +290,11 @@ crtpwr.2prop(alpha = 0.05, power = NA, m = 50, n = 30, cv = 0,
 
 
 
+```{r, eval = F, echo = F}
+
+inv_logit(log(prob_to_odd(0.1))+0.3)
+
+```
+
+
 
