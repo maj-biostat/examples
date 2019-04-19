@@ -1,0 +1,214 @@
+---
+title: "ICC in stepped wedge with binary response"
+subtitle: "`r knitr::current_input(dir = TRUE)`"
+author: "Mark Jones"
+date: "`r Sys.time()`"
+output:
+  html_document:
+    classoption: landscape
+    number_sections: yes
+    self_contained: yes
+    theme: united
+  pdf_document:
+    fig_caption: yes
+    number_sections: yes
+    toc: yes
+    toc_depth: 3
+  word_document:
+    toc: yes
+    toc_depth: '3'
+geometry: left=0.2cm,right=0.2cm,top=1cm,bottom=1cm
+editor_options:
+  chunk_output_type: console
+classoption: landscape
+---
+
+<!--    toc: yes
+    toc_float: true -->
+
+<style type="text/css">
+.main-container {
+  max-width: 1800px;
+  margin-left: auto;
+  margin-right: auto;
+}
+</style>
+
+# Preamble
+
+## Random intercept model
+
+To generate data for a cross-sectional SW design with a known ICC you can generate the baseline cluster proportions from a beta distribution, $p_{0k} \sim Beta(a, b)$. To do this solve:
+
+\begin{aligned}
+\mu &= \frac{a}{a+b} \\
+\rho &= \frac{1}{a+b+1}
+\end{aligned}
+
+to get:
+
+\begin{aligned}
+b &= \frac{(1-\rho)(1-\mu)}{\rho} \\
+a &= \frac{\mu(1-\rho)}{\rho}
+\end{aligned}
+
+the linear predictor is $logit(p_{jk}) = \beta_{0k} + \beta_1 X_{jk}$ with X as treatment indicator in cluster k at time k and $\beta_{0k} = log(\frac{p_{0k}}{1-p_{0k}})$.
+
+In a stepped wedge design, if you have 30 clusters and 15 time points with each time point being an independent set of 50 people you get.
+
+```{r}
+suppressPackageStartupMessages(library(lme4))
+a <- function(rho, mu)  (1-rho)*mu/rho
+b <- function(rho, mu)  (1-rho)*(1-mu)/rho
+odd <- function(p) p/(1-p)
+inv_logit <- function(x) exp(x)/(1+exp(x))
+
+n_clust <- 30
+n_time <- 15
+n_sub <- 50
+rho <- 0.05
+mu <- 0.6
+beta1 <- 0.3
+beta2 <- 0.03  
+  
+dgp1 <- function(){
+  dstart <- data.frame(clust_id = 1:n_clust,
+                     tx_start = rep(1:n_time, each = n_clust/n_time))
+
+  d <- data.frame(expand.grid(clust_id = 1:n_clust,
+                   t = 0:n_time,
+                   sub_id = 1:n_sub), stringsAsFactors = F)
+  
+  d <- merge(d, dstart, by = "clust_id")
+  d$tx_active <- as.numeric(d$t >= d$tx_start)
+  # just to get unique sub ids
+  d$sub_id_full <- paste("k", d$clust_id, "t", d$t, "i", d$sub_id, sep = "")
+  d <- d[order(d$clust_id, d$t, d$sub_id),]
+  # beta binomial
+  d$p0 <- rep(rbeta(n_clust, shape1 = a(rho, mu), shape2 = b(rho, mu)),
+            each = (n_time +1 ) * n_sub)
+  
+  d$eta <- log(odd(d$p0)) + beta1 * d$tx_active + beta2 * d$t
+  d$p <- inv_logit(d$eta)
+  d$y <- rbinom(nrow(d), 1, prob = d$p)
+  d
+}
+
+d <- dgp1()
+
+g1 <- geepack::geeglm(y ~ tx_active + t, family = binomial, data = d,
+                      id = clust_id)
+summary(g1)
+l1 <- lme4::glmer(y ~ tx_active + t + (1|clust_id), family = binomial, data = d)
+summary(l1)
+sjstats::icc(l1)
+```
+
+The pre-specified ICC should be recovered along with the parameters. Note the biased estimate from the GEE due to small number of clusters. 
+
+## Multilevel (3-level) model
+
+Think clusters with patients with repeat measures.
+
+According to Barker (Statistical considerations for estimating power of stepped wedge cluster randomised trials with cohorts of participants and a binary outcome) if you assume that $Y_{ijk}$ (i=subject, j= time, k=cluster) comes from some latent continuous measure a threshold value results in a 1 for the binary outcome then the level 1 variation can be assumed to come from a standard logistic distribution with mean zero and variance $\frac{\pi^2}{3}$. 
+
+\begin{aligned}
+\rho_3 &= \frac{\sigma^2_k}{\sigma_k^2 + \sigma_{i(k)}^2+ \frac{\pi^2}{3}} \\
+\rho_2 &= \frac{\sigma_k^2}{\sigma_k^2 + \sigma_{i(k)}^2} \\
+\rho_{23} &= \frac{\sigma_k^2 + \sigma_{i(k)}^2}{\sigma_k^2 + \sigma_{i(k)}^2 + \frac{\pi^2}{3}} \\
+\end{aligned}
+
++ $\rho_3$ is the proportion of total variance which due to between cluster variance
++ $\rho_2$ is the correlation between participants within a cluster
++ $\rho_{23}$ is the correlation between measurements for the same participant
+
+Solving these is tedious but eventually gives the following. Let's set $\rho_3 = 0.05$ and $\rho_2 = 0.5$. 
+
+```{r}
+# cluster level variance
+var_k <- function(rho2, rho3){
+  ((pi^2)/3) * (rho3*rho2/(rho2-rho3))
+}
+# subject level
+var_i <- function(rho2, rho3){
+  ((pi^2)/3) * (rho3*rho2/(rho2-rho3)) * ((1/rho2)-1)
+}
+
+rho2 <- 0.5
+rho3 <- 0.05
+vark <- var_k(rho2, rho3)
+vari <- var_i(rho2, vark)
+
+c(vari, vark)
+```
+
+The DGP function needs a minor modification.
+
+```{r}
+n_clust <- 30
+n_time <- 15
+n_sub <- 3 # this time we assume repeat measures on the 50
+rho <- 0.05
+mu <- 0.6
+beta1 <- 0.3
+beta2 <- 0.03  
+p0 <- 0.5
+  
+dgp2 <- function(){
+  dstart <- data.frame(clust_id = 1:n_clust,
+                     tx_start = rep(1:n_time, each = n_clust/n_time))
+
+  d <- data.frame(expand.grid(clust_id = 1:n_clust,
+                   t = 0:n_time,
+                   sub_id = 1:n_sub), stringsAsFactors = F)
+  
+  d <- merge(d, dstart, by = "clust_id")
+  d$tx_active <- as.numeric(d$t >= d$tx_start)
+  # just to get unique sub ids
+  d$sub_id_full <- paste("k", d$clust_id, "i", d$sub_id, sep = "")
+  
+  dclustint <- data.frame(clust_id = 1:n_clust,
+                          clust_int = rnorm(n_clust, 0, vark))
+  
+  dsubint <- data.frame(expand.grid(clust_id = 1:n_clust,
+                                    sub_id = 1:n_sub))
+  dsubint <- dsubint[order(dsubint$clust_id, dsubint$sub_id),]
+  dsubint$sub_int <- rnorm(nrow(dsubint), 0, vari)
+  
+  d <- merge(d, dclustint, by = "clust_id")
+  d <- merge(d, dsubint, by =c("clust_id", "sub_id"))
+  d <- d[order(d$clust_id, d$sub_id, d$t),]
+  
+  
+  d$eta <- log(odd(p0)) + beta1 * d$tx_active + beta2 * d$t + d$clust_int + d$sub_int
+  d$p <- inv_logit(d$eta)
+  d$y <- rbinom(nrow(d), 1, prob = d$p)
+  d
+}
+
+# it's rare to be able to recover 
+set.seed(5)
+d <- dgp2()
+l1 <- lme4::glmer(y ~ tx_active + t + (1|clust_id/sub_id), family = binomial, data = d)
+summary(l1)
+
+# I don't trust this:
+sjstats::icc(l1, adjust = F)
+
+# but I think that computing is actually not this straight forward anyway.
+myicc <- function(sig_top, sig_total){
+  sig_top/sig_total
+}
+sig <- VarCorr(l1)
+varsub <- as.numeric(sig[1])
+varclust <- as.numeric(sig[2])
+myicc(varsub, (varsub + varclust + ((pi^2)/3)))
+myicc(varclust, (varsub + varclust + ((pi^2)/3)))
+```
+
+# Summary
+
+Ran through the DGP to simulate data with pre-specified ICC values for both 2-level and 3-level hierarchical models with a stepped-wedge design.
+
+
+
