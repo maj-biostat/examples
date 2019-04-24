@@ -29,32 +29,36 @@ suppressPackageStartupMessages(library(brms))
 
 # Integration by parts
 
-Consider $\int x^2 ln(x) dx$. If $u$ and $v$ are functions of x then the product rule is $\frac{d}{dx}(uv) = u \frac{dv}{dx} + v \frac{du}{dx}$.
+Consider that we want to solve the integral $\int x^2 ln(x) dx$. 
 
-Integrate to get $uv = \int u \frac{dv}{dx} dx + \int v \frac{du}{dx} dx$.
+Let $u$ and $v$ be functions of x. The product rule is $\frac{d}{dx}(uv) = u \frac{dv}{dx} + v \frac{du}{dx}$. Integrate the product rule to get $uv = \int u \frac{dv}{dx} dx + \int v \frac{du}{dx} dx$. Rearranging gives the structure for integration by parts.
 
-Rearranging gives $\int u \frac{dv}{dx} dx = uv - \int v \frac{du}{dx} dx$.
+\begin{aligned}
+\int u \frac{dv}{dx} dx = uv - \int v \frac{du}{dx} dx
+\end{aligned}
 
-If there is an $log$ in the original problem then you have to set $u = log(x)$ (because you don't have an integral for log(x). Set $dv = x^2 dx$.
+Return to the integral we want to solve. There is an $log$ in the product so you have to set $u = log(x)$ (because you don't have an integral for log(x) and then set $dv = x^2 dx$.
 
 If $u = log(x)$ then $\frac{du}{dx} = \frac{1}{x}$.
 
-If $\frac{dv}{dx} = x^2$ then $v = \int x^2 dx = \frac{x^3}{3} + c$ (but ignore the c for now).
+If $\frac{dv}{dx} = x^2$ then $v = \int x^2 dx = \frac{x^3}{3} + c$ (but ignore the c for now). Substitution shows we now have the desired form:
 
 \begin{aligned}
-  \int u \frac{du}{dx}dx &= \int log(x) x^2 dx \\
-  &= \frac{x^3}{3}log(x) - \int \frac{x^3}{3}\frac{1}{x}dx \\
+  \int log(x) x^2 dx &= \int u \frac{dv}{dx}dx \\
+\end{aligned}
+
+Solving:
+
+\begin{aligned}
+  \int log(x) x^2 dx &= \frac{x^3}{3}log(x) - \int \frac{x^3}{3}\frac{1}{x}dx \\
   &= \frac{x^3}{3}log(x) - \int \frac{x^2}{3}dx \\ 
   &= \frac{x^3}{3}log(x) - \frac{x^3}{9} + c \\ 
   &= \frac{x^3}{3}(log(x) - 1/3) + c
 \end{aligned}
 
-Note:
+> RULES: (1) if one of the factors is a log function - set that log function to u (2) if there is no log term, the power of x is taken as u (3) if there is no log nor power of x then the exponential is u.
 
-+ If one of the factors is a log function - set that log function to u.
-+ If there is no log term, the power of x is taken as u.
-+ If there is no log nor power of x then the exponential is u.
-+ You may need to go through the process multiple times and you may need to do an $I$ substitution if you end up where you started.
+> NOTE: You may need to go through the process multiple times and you may need to do an $I$ substitution if you end up where you started.
 
 
 # Integrals of form $\int \frac{f'(x)}{f(x)}dx$ or $\int f'(x)f(x)dx$
@@ -76,6 +80,13 @@ Substitute again: $\int \frac{2x + 3}{x^2 + 3x -5} dx = log(x^2 + 3x -5) + c$.
 Similarly consider $\int (x^2+7x-4)(2x+7) dx$. Notice that if $z = x^2+7x-4$, $\frac{dz}{dx} = 2x + 7$. Substitution gives $\int (x^2+7x-4)(2x+7) dx = \int z dz = \frac{z^2}{2}+c$.
 
 Substitute again: $\int (x^2+7x-4)(2x+7) dx = \frac{(x^2+7x-4)^2}{2}+c$.
+
+
+\  
+\  
+\   
+\    
+. 
 
 
 
